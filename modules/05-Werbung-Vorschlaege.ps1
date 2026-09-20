@@ -81,10 +81,12 @@ $adv = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'
             Id          = 'ads.widgets'
             Name        = 'Widgets / Neuigkeiten und Interessen'
             Risk        = 'Low'
-            Description = 'Deaktiviert das Widgets-Board mit MSN-Nachrichten, das beim Öffnen und im Hintergrund Inhalte von Microsoft-Servern lädt.'
+            Description = 'Deaktiviert das Widgets-Board mit MSN-Nachrichten, das beim Öffnen und im Hintergrund Inhalte von Microsoft-Servern lädt, und blendet die Widgets-Schaltfläche aus.'
+            Warning     = 'Auf manchen Windows-11-Installationen sind die beiden Richtlinien-Schlüssel schreibgeschützt; dann meldet bye2spy zwei Hinweise. Widgets lassen sich in dem Fall über Einstellungen > Personalisierung > Taskleiste abschalten oder über das Modul "Bloatware" ganz entfernen (bloat/apps.widgets).'
             Registry    = @(
                 Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' 'AllowNewsAndInterests' 0
                 Reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds' 'EnableFeeds' 0
+                Reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'TaskbarDa' 0
             )
         }
         @{

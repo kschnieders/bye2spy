@@ -2,9 +2,9 @@
 
 **Windows 11 Telemetrie, Copilot & KI abschalten – mit einem Befehl, auswählbar, rückgängig machbar.**
 
-bye2spy ist eine Sammlung von PowerShell-Modulen, die alles abschaltet, was Windows 11 an Daten an Microsoft sendet: Diagnosedaten, Copilot, Recall, KI-Agenten, Werbe-IDs, Bing-Suche, Cloud-Synchronisierung, Edge- und Office-Telemetrie. Du wählst in einem Konsolenmenü aus, was deaktiviert wird. Jede Änderung wird gesichert und lässt sich zurücknehmen.
+bye2spy ist eine Sammlung von PowerShell-Modulen, die alles abschaltet, was Windows 11 an Daten an Microsoft sendet: Diagnosedaten, Copilot, Recall, KI-Agenten, Werbe-IDs, Bing-Suche, Cloud-Synchronisierung, Edge- und Office-Telemetrie. Dazu entfernt es Bloatware – von Microsoft, vom PC-Hersteller und von Drittanbietern. Du wählst in einem Konsolenmenü aus, was deaktiviert wird. Jede Änderung wird gesichert und lässt sich zurücknehmen.
 
-- 12 Module, 75 Einstellungen, jede mit Beschreibung, Risikostufe und Quellenangabe
+- 13 Module, 80 Einstellungen, jede mit Beschreibung, Risikostufe und Quellenangabe
 - Wo möglich werden offizielle Gruppenrichtlinien-Registrywerte von Microsoft verwendet (keine undokumentierten Hacks)
 - Statusanzeige: was ist bereits aktiv, was teilweise, was offen
 - Vorschau-Modus: zeigt jede Änderung an, ohne etwas zu verändern
@@ -32,6 +32,12 @@ Das lädt die aktuelle Version nach `%ProgramData%\bye2spy` und startet das Ausw
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/kschnieders/bye2spy/main/install.ps1))) -Preset Recommended -Yes
 ```
 
+**Für Praxen, Kliniken und Kanzleien (Preset „Kritis“):**
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/kschnieders/bye2spy/main/install.ps1))) -Preset Kritis
+```
+
 **Oder lokal aus dem geklonten Repository:**
 
 ```powershell
@@ -45,7 +51,7 @@ powershell -ExecutionPolicy Bypass -File .\bye2spy.ps1
 ```
  bye2spy v1.0.0  -  Windows 11 Telemetrie, Copilot & KI abschalten
  Windows 11 Pro 25H2 (Build 26200.9457, Professional)  |  PC\user
- Ausgewählt: 50 / 75   (Mittel: 0, Hoch: 0)   Wiederherstellungspunkt: ja
+ Ausgewählt: 52 / 80   (Mittel: 0, Hoch: 0)   Wiederherstellungspunkt: ja
  --------------------------------------------------------------------------------
  v [x] Telemetrie & Diagnosedaten   10/11 gewählt, 2 aktiv
        [x] Gering  Diagnosedaten auf Minimum setzen                        offen
@@ -82,6 +88,59 @@ Beim Start sind die **empfohlenen** Einstellungen (geringes Risiko) vorausgewäh
 
 Mit **A** bzw. `-Preset All` wird wirklich alles ausgewählt. Vor dem Anwenden werden alle Einstellungen mit mittlerem und hohem Risiko samt Warnhinweis aufgelistet.
 
+## Presets
+
+Ein Preset ist eine fertige Zusammenstellung von Einstellungen. Im Menü holst du sie mit **K**, auf der Kommandozeile mit `-Preset <Name>`.
+
+| Preset | Umfang | Für wen |
+|---|---|---|
+| `Recommended` | alle Einstellungen mit geringem Risiko | Standard, für jeden privaten PC |
+| `All` | alles, auch mittleres und hohes Risiko | wenn wirklich jeder Datenabfluss weg soll |
+| `Kritis` | „Empfohlen“ plus 20 gezielte Einstellungen mit mittlerem/hohem Risiko | Arbeitsplätze mit Patienten- oder Mandantendaten |
+
+### Preset „Kritis“ – Medizin, Praxis, Kanzlei
+
+Gedacht für Rechner, auf denen Gesundheitsdaten (Art. 9 DSGVO) oder Berufsgeheimnisse (§ 203 StGB) verarbeitet werden: Praxen, MVZ, Kliniken, Labore, Apotheken, Pflegedienste, Kanzleien.
+
+**Zusätzlich zu „Empfohlen“ abgeschaltet oder entfernt:**
+
+- **Cloud & Konten:** OneDrive gesperrt, Synchronisierungshost, geräteübergreifende Erfahrungen, Phone Link
+- **Office:** verbundene Erfahrungen inklusive Copilot – Dokumentinhalte gehen nicht mehr an Clouddienste
+- **Edge:** Synchronisierung, Anmeldung, Cloud-Rechtschreibung, Autofill
+- **Datenschutz:** Standortdienste, „Mein Gerät suchen“, Hintergrund-Apps, Spotlight
+- **Telemetrie:** Inventar- und Kompatibilitätsdienste, die installierte Software melden
+- **Apps:** neues Outlook (spiegelt Postfächer samt Zugangsdaten über Microsoft-Server), Widgets, Game Bar, Xbox, Hersteller-Software, Microsoft-Beigaben
+
+**Bewusst *nicht* enthalten:**
+
+| Nicht enthalten | Begründung |
+|---|---|
+| Defender-Cloudschutz, SmartScreen, Phishingschutz | Art. 32 DSGVO verlangt Sicherheit der Verarbeitung – ein Praxis-PC ohne aktuellen Schadsoftwareschutz wäre das größere Risiko |
+| Kamera- und Mikrofonsperre | Videosprechstunde und Teams brauchen beides |
+| Microsoft-Konto-Dienst | würde Store-Updates und Anmeldungen blockieren |
+| Teams | wird in vielen Einrichtungen für Besprechungen genutzt |
+| hosts-Sperre, NCSI-Abschaltung | stören Fachanwendungen bzw. werden von Defender als Manipulation gewertet |
+
+Praxisverwaltungssoftware (DS-WIN, CGM, medatixx …), TI-Konnektor und Kartenterminals werden nicht angefasst. Teste nach dem Neustart trotzdem einmal den kompletten Ablauf.
+
+> **Wichtig:** Das Preset ist ein technisches Hilfsmittel, keine Zertifizierung und kein Ersatz für Risikoanalyse, Verzeichnis von Verarbeitungstätigkeiten oder Datenschutzbeauftragten.
+
+### Eigenes Preset anlegen
+
+Eine Datei `presets\<name>.ps1` wird automatisch geladen:
+
+```powershell
+@{
+    Id          = 'Kanzlei'
+    Name        = 'Kanzlei-Arbeitsplatz'
+    Description = 'Kurzbeschreibung für die Übersicht.'
+    Base        = 'Recommended'              # oder 'All'
+    Include     = @('cloud.onedrive', 'office.connected')   # zusätzliche IDs
+    Exclude     = @('defender.smartscreen')                 # nie anwenden
+    Notes       = @('Hinweis, der vor dem Anwenden angezeigt wird.')
+}
+```
+
 ## Kommandozeile
 
 ```powershell
@@ -89,6 +148,7 @@ Mit **A** bzw. `-Preset All` wird wirklich alles ausgewählt. Vor dem Anwenden w
 .\bye2spy.ps1 -Status                           # Zustand aller Einstellungen anzeigen
 .\bye2spy.ps1 -List                             # alle IDs auflisten
 .\bye2spy.ps1 -Preset Recommended               # empfohlene Einstellungen (mit Rückfrage)
+.\bye2spy.ps1 -Preset Kritis                    # Preset für Praxis/Kanzlei (siehe unten)
 .\bye2spy.ps1 -Preset All -Exclude defender,network.hosts -Yes
 .\bye2spy.ps1 -Module telemetry,ai              # nur empfohlene Einstellungen dieser Module
 .\bye2spy.ps1 -Module ai -Preset All            # alles aus dem KI-Modul
@@ -98,7 +158,27 @@ Mit **A** bzw. `-Preset All` wird wirklich alles ausgewählt. Vor dem Anwenden w
 .\bye2spy.ps1 -Restore All                      # alle Durchläufe rückgängig machen
 ```
 
-Weitere Schalter: `-NoRestorePoint` (keinen Wiederherstellungspunkt erstellen), `-Yes` (keine Rückfrage). Ausführliche Hilfe: `Get-Help .\bye2spy.ps1 -Full`.
+Weitere Schalter: `-NoRestorePoint` (keinen Wiederherstellungspunkt erstellen), `-Yes` (keine Rückfrage), `-Detailed` (zeigt jeden einzelnen Registrywert statt der kompakten Fortschrittsansicht – praktisch zum Mitschreiben in eine Datei). Ausführliche Hilfe: `Get-Help .\bye2spy.ps1 -Full`.
+
+Die Ausgabe beim Anwenden sieht so aus:
+
+```
+  bye2spy 1.0.0   Einstellungen werden angewendet
+  ──────────────────────────────────────────────────────────────────────────
+  Windows 11 Pro 25H2  · Build 26200.9457  · PC\user
+  52 Einstellungen  · Wiederherstellungspunkt: ja
+  ──────────────────────────────────────────────────────────────────────────
+
+  ✓ Systemwiederherstellungspunkt erstellt
+
+  [ 1/52] ✓ Telemetrie & Diagnosed… › Diagnosedaten auf Minimum setzen      17 geändert
+  [ 2/52] · Telemetrie & Diagnosed… › Telemetrie-Dienste abschalten        bereits aktiv
+  [ 3/52] ! Werbung, Vorschläge & … › Widgets / Neuigkeiten                   2 Hinweise
+      Registry …\Dsh\AllowNewsAndInterests: von Windows schreibgeschützt
+  [ 4/52] ███░░░░░░░░░░░   6% Copilot & KI-Funktionen › Windows Copilot abschalten
+```
+
+Die laufende Zeile zeigt den Fortschrittsbalken und wird durch das Ergebnis ersetzt. Alle Details stehen weiterhin vollständig im Protokoll unter `logs\`.
 
 ## Sicherung & Rückgängig
 
@@ -247,6 +327,16 @@ Jede Einstellung ist im jeweiligen Modul unter `modules\` dokumentiert (Registry
 | `dev.visualstudio` | Visual Studio: Programm zur Verbesserung & Feedback | Gering | ✓ |
 | `dev.nvidia` | NVIDIA-Telemetrie | Gering | ✓ |
 
+### Bloatware entfernen (alle Hersteller) (`bloat`)
+
+| ID | Einstellung | Risiko | Empfohlen |
+|---|---|---|:-:|
+| `bloat.promo` | Werbe- und Partner-Apps von Drittanbietern | Gering | ✓ |
+| `bloat.msapps` | Nicht benötigte Microsoft-Beigaben | Mittel |  |
+| `bloat.xbox` | Xbox-Apps und Xbox-Dienste | Mittel |  |
+| `bloat.oem` | Hersteller-Software (HP, Lenovo, Dell, Acer, ASUS, MSI, Samsung ...) | Mittel |  |
+| `bloat.win32` | Vorinstallierte Windows-Programme auflisten (Testversionen & Co.) | Gering | ✓ |
+
 ## Was bewusst *nicht* abgeschaltet wird
 
 Diese Verbindungen zu Microsoft bleiben absichtlich bestehen, weil ihr Abschalten die Sicherheit des Systems gefährdet:
@@ -279,11 +369,14 @@ bye2spy/
 ├── bye2spy.ps1          # Master-Skript: Menü, Kommandozeile, Anwenden, Rückgängig
 ├── lib/
 │   └── Bye2Spy.Core.psm1  # Aktionen mit Journal: Registry, Dienste, Aufgaben, Apps, Firewall, hosts, Defender
+├── presets/
+│   └── kritis.ps1       # fertige Zusammenstellung für Medizin/Praxis/Kanzlei
 └── modules/
     ├── 01-Telemetrie.ps1
     ├── 02-Copilot-KI.ps1
     ├── ...
-    └── 12-Entwickler-Drittanbieter.ps1
+    ├── 12-Entwickler-Drittanbieter.ps1
+    └── 13-Bloatware.ps1
 ```
 
 ### Eigenes Modul hinzufügen

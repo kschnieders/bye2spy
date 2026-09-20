@@ -12,7 +12,7 @@ $script:JournalFile = $null
 $script:LogFile     = $null
 $script:LogSink     = $null
 $script:WhatIfMode  = $false
-$script:Stats       = @{ Changed = 0; Unchanged = 0; Warnings = 0 }
+$script:Stats       = @{ Changed = 0; Unchanged = 0; Warnings = 0; Planned = 0 }
 $script:AppxCache   = $null
 $script:TaskCache   = $null
 
@@ -25,6 +25,21 @@ $script:HostsEnd    = '# <<< bye2spy END'
 function Set-B2SLogSink {
     param([scriptblock]$Sink)
     $script:LogSink = $Sink
+}
+
+function Get-B2SFriendlyError {
+    <# Macht aus technischen Ausnahmen eine verständliche Meldung. #>
+    param($ErrorRecord)
+    $ex = $ErrorRecord.Exception
+    $msg = "$($ex.Message)".Trim()
+    if ($ex -is [System.UnauthorizedAccessException] -or $ex -is [System.Security.SecurityException] -or
+        $msg -match 'nicht autorisierten Vorgang|unauthorized operation|Zugriff verweigert|Access to the .* is denied|Requested registry access is not allowed') {
+        return 'von Windows schreibgeschützt - dieser Wert lässt sich nur über die Einstellungen-App ändern'
+    }
+    if ($msg -match 'erfordert erhöhte Rechte|requires elevation') {
+        return 'Administratorrechte erforderlich'
+    }
+    $msg
 }
 
 function Write-B2SLog {
@@ -65,7 +80,7 @@ function Start-B2SSession {
     )
     $script:WhatIfMode = [bool]$WhatIf
     $script:Journal.Clear()
-    $script:Stats = @{ Changed = 0; Unchanged = 0; Warnings = 0 }
+    $script:Stats = @{ Changed = 0; Unchanged = 0; Warnings = 0; Planned = 0 }
     $script:AppxCache = $null
 
     $stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
@@ -208,7 +223,7 @@ function Set-B2SReg {
     }
     $before = if ($old.Exists) { $old.Value } else { '<nicht gesetzt>' }
     if ($script:WhatIfMode) {
-        Write-B2SLog "  [Vorschau] $Path\$Name = $Value (vorher: $before)" Change
+        $script:Stats.Planned++; Write-B2SLog "  [Vorschau] $Path\$Name = $Value (vorher: $before)" Change
         return 'WhatIf'
     }
     if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
@@ -266,7 +281,7 @@ function Disable-B2STask {
     foreach ($t in $tasks) {
         if ($t.State -eq 'Disabled') { $script:Stats.Unchanged++; continue }
         if ($script:WhatIfMode) {
-            Write-B2SLog "  [Vorschau] Aufgabe deaktivieren: $($t.TaskPath)$($t.TaskName)" Change
+            $script:Stats.Planned++; Write-B2SLog "  [Vorschau] Aufgabe deaktivieren: $($t.TaskPath)$($t.TaskName)" Change
             continue
         }
         Disable-ScheduledTask -TaskPath $t.TaskPath -TaskName $t.TaskName -ErrorAction Stop | Out-Null
@@ -301,7 +316,7 @@ function Remove-B2SAppx {
         return
     }
     foreach ($p in $packages) {
-        if ($script:WhatIfMode) { Write-B2SLog "  [Vorschau] App entfernen: $($p.Name)" Change; continue }
+        if ($script:WhatIfMode) { $script:Stats.Planned++; Write-B2SLog "  [Vorschau] App entfernen: $($p.Name)" Change; continue }
         try {
             Remove-AppxPackage -Package $p.PackageFullName -AllUsers -ErrorAction Stop
         }
@@ -314,7 +329,7 @@ function Remove-B2SAppx {
         Write-B2SLog "  App entfernt: $($p.Name)" Change
     }
     foreach ($p in $provisioned) {
-        if ($script:WhatIfMode) { Write-B2SLog "  [Vorschau] Bereitgestellte App entfernen: $($p.DisplayName)" Change; continue }
+        if ($script:WhatIfMode) { $script:Stats.Planned++; Write-B2SLog "  [Vorschau] Bereitgestellte App entfernen: $($p.DisplayName)" Change; continue }
         Remove-AppxProvisionedPackage -Online -PackageName $p.PackageName -ErrorAction Stop | Out-Null
         Write-B2SLog "  Bereitstellung entfernt (neue Benutzer): $($p.DisplayName)" Change
     }
@@ -325,7 +340,7 @@ function Disable-B2SOptionalFeature {
     param([Parameter(Mandatory)][string]$Name)
     try { $feature = Get-WindowsOptionalFeature -Online -FeatureName $Name -ErrorAction Stop }
     catch {
-        if ($script:WhatIfMode) { Write-B2SLog "  [Vorschau] Feature deaktivieren (falls vorhanden): $Name" Change; return }
+        if ($script:WhatIfMode) { $script:Stats.Planned++; Write-B2SLog "  [Vorschau] Feature deaktivieren (falls vorhanden): $Name" Change; return }
         throw
     }
     if (-not $feature) {
@@ -333,7 +348,7 @@ function Disable-B2SOptionalFeature {
         return
     }
     if ("$($feature.State)" -like 'Disabled*') { $script:Stats.Unchanged++; return }
-    if ($script:WhatIfMode) { Write-B2SLog "  [Vorschau] Feature deaktivieren: $Name" Change; return }
+    if ($script:WhatIfMode) { $script:Stats.Planned++; Write-B2SLog "  [Vorschau] Feature deaktivieren: $Name" Change; return }
     Disable-WindowsOptionalFeature -Online -FeatureName $Name -NoRestart -ErrorAction Stop | Out-Null
     Add-B2SJournal @{ Kind = 'Feature'; Name = $Name }
     $script:Stats.Changed++
@@ -355,7 +370,7 @@ function Add-B2SFirewallBlock {
         $script:Stats.Unchanged++
         return
     }
-    if ($script:WhatIfMode) { Write-B2SLog "  [Vorschau] Firewall blockiert ausgehend: $Name" Change; return }
+    if ($script:WhatIfMode) { $script:Stats.Planned++; Write-B2SLog "  [Vorschau] Firewall blockiert ausgehend: $Name" Change; return }
     $params = @{
         DisplayName = $displayName
         Group       = 'bye2spy'
@@ -396,7 +411,7 @@ function Test-B2SHostsBlock {
 
 function Add-B2SHostsBlock {
     param([Parameter(Mandatory)][string[]]$Domains)
-    if ($script:WhatIfMode) { Write-B2SLog "  [Vorschau] hosts-Datei: $($Domains.Count) Domains auf 0.0.0.0" Change; return }
+    if ($script:WhatIfMode) { $script:Stats.Planned++; Write-B2SLog "  [Vorschau] hosts-Datei: $($Domains.Count) Domains auf 0.0.0.0" Change; return }
     $existed = Test-B2SHostsBlock
     $content = New-Object System.Collections.ArrayList
     foreach ($l in (Get-B2SHostsContentWithoutBlock)) { [void]$content.Add($l) }
@@ -422,7 +437,7 @@ function Set-B2SMpPreference {
     $pref = Get-MpPreference -ErrorAction Stop
     $old = $pref.$Name
     if (Test-B2SValueEqual $old $Value) { $script:Stats.Unchanged++; return }
-    if ($script:WhatIfMode) { Write-B2SLog "  [Vorschau] Defender: $Name = $Value (vorher: $old)" Change; return }
+    if ($script:WhatIfMode) { $script:Stats.Planned++; Write-B2SLog "  [Vorschau] Defender: $Name = $Value (vorher: $old)" Change; return }
     $p = @{ $Name = $Value }
     Set-MpPreference @p -ErrorAction Stop
     $new = (Get-MpPreference).$Name
@@ -463,6 +478,30 @@ function Import-B2SModules {
         }
     }
     , $modules.ToArray()
+}
+
+function Import-B2SPresets {
+    <# Lädt die Preset-Dateien aus .\presets (Zusammenstellungen von Einstellungen). #>
+    param([Parameter(Mandatory)][string]$Directory)
+    $presets = New-Object System.Collections.ArrayList
+    if (-not (Test-Path -LiteralPath $Directory)) { return , $presets.ToArray() }
+    foreach ($file in (Get-ChildItem -LiteralPath $Directory -Filter '*.ps1' | Sort-Object Name)) {
+        try {
+            $p = & $file.FullName
+            if (-not ($p -is [hashtable]) -or -not $p.Id) {
+                Write-Warning "Preset '$($file.Name)' hat kein gültiges Format und wird ignoriert."
+                continue
+            }
+            if (-not $p.Base) { $p.Base = 'Recommended' }
+            foreach ($key in 'Include', 'Exclude', 'Notes') { if (-not $p.$key) { $p[$key] = @() } }
+            $p.File = $file.Name
+            [void]$presets.Add($p)
+        }
+        catch {
+            Write-Warning "Preset '$($file.Name)' konnte nicht geladen werden: $($_.Exception.Message)"
+        }
+    }
+    , $presets.ToArray()
 }
 
 function Get-B2SRiskLabel {
@@ -529,42 +568,42 @@ function Invoke-B2STweak {
     foreach ($r in @($Tweak.Registry | Where-Object { $_ })) {
         $type = if ($r.Type) { $r.Type } else { 'DWord' }
         try { [void](Set-B2SReg -Path $r.Path -Name $r.Name -Value $r.Value -Type $type) }
-        catch { Write-B2SLog "  Registry $($r.Path)\$($r.Name): $($_.Exception.Message)" Warn }
+        catch { Write-B2SLog "  Registry $($r.Path)\$($r.Name): $(Get-B2SFriendlyError $_)" Warn }
     }
     foreach ($s in @($Tweak.Services | Where-Object { $_ })) {
         try { Disable-B2SService -Name $s }
-        catch { Write-B2SLog "  Dienst $($s): $($_.Exception.Message)" Warn }
+        catch { Write-B2SLog "  Dienst $($s): $(Get-B2SFriendlyError $_)" Warn }
     }
     foreach ($t in @($Tweak.Tasks | Where-Object { $_ })) {
         try { Disable-B2STask -Task $t }
-        catch { Write-B2SLog "  Aufgabe $($t): $($_.Exception.Message)" Warn }
+        catch { Write-B2SLog "  Aufgabe $($t): $(Get-B2SFriendlyError $_)" Warn }
     }
     foreach ($a in @($Tweak.Appx | Where-Object { $_ })) {
         try { Remove-B2SAppx -Name $a }
-        catch { Write-B2SLog "  App $($a): $($_.Exception.Message)" Warn }
+        catch { Write-B2SLog "  App $($a): $(Get-B2SFriendlyError $_)" Warn }
     }
     foreach ($f in @($Tweak.OptionalFeatures | Where-Object { $_ })) {
         try { Disable-B2SOptionalFeature -Name $f }
-        catch { Write-B2SLog "  Feature $($f): $($_.Exception.Message)" Warn }
+        catch { Write-B2SLog "  Feature $($f): $(Get-B2SFriendlyError $_)" Warn }
     }
     foreach ($fw in @($Tweak.Firewall | Where-Object { $_ })) {
         try { Add-B2SFirewallBlock -Name $fw.Name -Program $fw.Program -Service $fw.Service }
-        catch { Write-B2SLog "  Firewall $($fw.Name): $($_.Exception.Message)" Warn }
+        catch { Write-B2SLog "  Firewall $($fw.Name): $(Get-B2SFriendlyError $_)" Warn }
     }
     if ($Tweak.MpPreference) {
         foreach ($k in $Tweak.MpPreference.Keys) {
             try { Set-B2SMpPreference -Name $k -Value $Tweak.MpPreference[$k] }
-            catch { Write-B2SLog "  Defender $($k): $($_.Exception.Message)" Warn }
+            catch { Write-B2SLog "  Defender $($k): $(Get-B2SFriendlyError $_)" Warn }
         }
     }
     $hosts = @($Tweak.Hosts | Where-Object { $_ })
     if ($hosts.Count) {
         try { Add-B2SHostsBlock -Domains $hosts }
-        catch { Write-B2SLog "  hosts-Datei: $($_.Exception.Message)" Warn }
+        catch { Write-B2SLog "  hosts-Datei: $(Get-B2SFriendlyError $_)" Warn }
     }
     if ($Tweak.Script) {
         if ($script:WhatIfMode) {
-            Write-B2SLog "  [Vorschau] Zusätzliche Aktion: $($Tweak.ScriptInfo)" Change
+            $script:Stats.Planned++; Write-B2SLog "  [Vorschau] Zusätzliche Aktion: $($Tweak.ScriptInfo)" Change
         }
         else {
             try { & $Tweak.Script }

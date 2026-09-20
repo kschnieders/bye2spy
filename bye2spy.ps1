@@ -9,7 +9,8 @@
     Jede Änderung wird in .\backups protokolliert und kann rückgängig gemacht werden.
 
 .PARAMETER Preset
-    Recommended = nur Einstellungen mit geringem Risiko, All = alles (inkl. Mittel/Hoch).
+    Recommended = nur Einstellungen mit geringem Risiko, All = alles (inkl. Mittel/Hoch),
+    oder der Name eines Presets aus .\presets (z. B. Kritis). Liste: -List
 
 .PARAMETER Module
     Nur diese Module (IDs, z. B. telemetry,ai). Mit -Preset kombinierbar (Standard: Recommended).
@@ -45,7 +46,6 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('Recommended', 'All')]
     [string]$Preset,
     [string[]]$Module,
     [string[]]$Tweak,
@@ -56,6 +56,7 @@ param(
     [switch]$DryRun,
     [switch]$NoRestorePoint,
     [switch]$Yes,
+    [switch]$Detailed,
     [switch]$Elevated
 )
 
@@ -114,6 +115,7 @@ $Exclude = Split-List $Exclude
 
 $Modules = Import-B2SModules -Directory (Join-Path $Root 'modules')
 $AllTweaks = @($Modules | ForEach-Object { $_.Tweaks })
+$Presets = Import-B2SPresets -Directory (Join-Path $Root 'presets')
 $BackupDir = Join-Path $Root 'backups'
 
 #endregion
@@ -143,14 +145,51 @@ function Get-EnvironmentWarnings {
     $w
 }
 
+function Get-Preset {
+    param([string]$Name)
+    if (-not $Name) { return $null }
+    @($Presets | Where-Object { $_.Id -eq $Name })[0]
+}
+
+function Get-PresetNames {
+    @('Recommended', 'All') + @($Presets | ForEach-Object { $_.Id })
+}
+
+function Get-PresetTweaks {
+    <# Einstellungen eines Presets aus .\presets (Basis + Include - Exclude). #>
+    param([hashtable]$PresetDef)
+    $base = if ($PresetDef.Base -eq 'All') { $AllTweaks } else { @($AllTweaks | Where-Object { $_.Recommended }) }
+    $known = @($AllTweaks | ForEach-Object { $_.Id })
+    foreach ($id in @($PresetDef.Include) + @($PresetDef.Exclude)) {
+        if ($known -notcontains $id) { Write-Warning "Preset '$($PresetDef.Id)': unbekannte ID '$id'" }
+    }
+    $ids = @(@($base | ForEach-Object { $_.Id }) + @($PresetDef.Include)) | Select-Object -Unique
+    @($AllTweaks | Where-Object { $ids -contains $_.Id -and @($PresetDef.Exclude) -notcontains $_.Id })
+}
+
+function Show-PresetInfo {
+    param([hashtable]$PresetDef, [int]$Count)
+    Write-Host ''
+    Write-Host "  Preset: $($PresetDef.Name)" -ForegroundColor Cyan
+    Write-Host "  $($PresetDef.Description)" -ForegroundColor Gray
+    Write-Host "  $Count Einstellungen" -ForegroundColor DarkGray
+    foreach ($n in @($PresetDef.Notes)) { Write-Host "    - $n" -ForegroundColor DarkYellow }
+    Write-Host ''
+}
+
 function Select-Tweaks {
     param([string]$PresetName, [string[]]$ModuleIds, [string[]]$TweakIds, [string[]]$ExcludeIds)
     $known = @($AllTweaks | ForEach-Object { $_.Id }) + @($Modules | ForEach-Object { $_.Id })
     foreach ($id in @($ModuleIds) + @($TweakIds) + @($ExcludeIds)) {
         if ($id -and $known -notcontains $id) { Write-Warning "Unbekannte ID: $id  (Liste mit -List)" }
     }
+    $presetDef = Get-Preset $PresetName
     if ($TweakIds.Count) {
         $sel = @($AllTweaks | Where-Object { $TweakIds -contains $_.Id })
+    }
+    elseif ($presetDef) {
+        $sel = Get-PresetTweaks $presetDef
+        if ($ModuleIds.Count) { $sel = @($sel | Where-Object { $ModuleIds -contains $_.ModuleId }) }
     }
     else {
         $sel = $AllTweaks
@@ -163,34 +202,231 @@ function Select-Tweaks {
     , @($sel)
 }
 
-$script:ProgressCallback = $null
+#region Ausgabe ---------------------------------------------------------------------------
+
+$script:Ui = @{
+    Plain    = $false   # true = keine Cursor-Tricks (umgeleitete Ausgabe oder -Detailed)
+    BarShown = $false
+    Width    = 80
+    Warnings = $null
+}
+
+# Zeichen: Kästchen/Balken aus dem Unicode-Block, mit ASCII-Rückfall
+$script:Glyph = @{
+    Rule = [char]0x2500; Full = [char]0x2588; Empty = [char]0x2591
+    Ok   = [char]0x2713; Warn = '!'; Skip = [char]0x00B7; Run = [char]0x203A; Sep = [char]0x203A
+}
+
+function Initialize-B2SUi {
+    param([switch]$ForcePlain)
+    $redirected = $true
+    try { $redirected = [Console]::IsOutputRedirected } catch { }
+    $script:Ui.Plain = [bool]$ForcePlain -or $redirected
+    try { $script:Ui.Width = [Math]::Max(60, [Math]::Min(120, [Console]::WindowWidth - 1)) } catch { $script:Ui.Width = 80 }
+    if ($script:Ui.Plain) {
+        $script:Glyph = @{ Rule = '-'; Full = '#'; Empty = '.'; Ok = '+'; Warn = '!'; Skip = '.'; Run = '>'; Sep = '>' }
+    }
+}
+
+function Write-UiRule {
+    Write-Host ('  ' + ([string]$script:Glyph.Rule) * ($script:Ui.Width - 3)) -ForegroundColor DarkGray
+}
+
+function Format-UiCut {
+    param([string]$Text, [int]$Max)
+    if ($Max -lt 4) { return '' }
+    if ($Text.Length -le $Max) { return $Text }
+    $Text.Substring(0, $Max - 1) + [char]0x2026
+}
+
+function Show-RunHeader {
+    param($Sys, [int]$Count, [switch]$Preview, [bool]$RestorePoint)
+    Write-Host ''
+    Write-Host '  bye2spy ' -ForegroundColor Cyan -NoNewline
+    Write-Host $Version -ForegroundColor DarkCyan -NoNewline
+    if ($Preview) { Write-Host '   VORSCHAU - es wird nichts verändert' -ForegroundColor Yellow }
+    else { Write-Host '   Einstellungen werden angewendet' -ForegroundColor Gray }
+    Write-UiRule
+    Write-Host ("  {0} {1}  {3} Build {2}  {3} {4}" -f $Sys.ProductName, $Sys.Version, $Sys.Build, $script:Glyph.Skip, $Sys.RunAs) -ForegroundColor DarkGray
+    $rp = if ($Preview) { 'entfällt' } elseif ($RestorePoint) { 'ja' } else { 'nein' }
+    Write-Host ("  {0} Einstellungen  {1} Wiederherstellungspunkt: {2}" -f $Count, $script:Glyph.Skip, $rp) -ForegroundColor DarkGray
+    foreach ($w in (Get-EnvironmentWarnings)) {
+        Write-Host "  $($script:Glyph.Warn) " -NoNewline -ForegroundColor Yellow
+        Write-Host (Format-UiCut $w ($script:Ui.Width - 6)) -ForegroundColor DarkYellow
+    }
+    Write-UiRule
+    Write-Host ''
+}
+
+function Write-RunningLine {
+    <# Laufende Einstellung mit Fortschrittsbalken - wird danach überschrieben. #>
+    param([hashtable]$Tweak, [int]$Index, [int]$Total)
+    if ($script:Ui.Plain) { return }
+
+    $counter = '  [{0}/{1}] ' -f $Index.ToString().PadLeft($Total.ToString().Length), $Total
+    $barWidth = 14
+    $ratio = if ($Total -gt 0) { ($Index - 1) / $Total } else { 0 }
+    $fill = [int][Math]::Round($barWidth * $ratio)
+    $percent = '{0,3:0}% ' -f ($ratio * 100)
+    $rest = $script:Ui.Width - $counter.Length - $barWidth - $percent.Length - 4
+    $text = Format-UiCut ("$($Tweak.ModuleName) $($script:Glyph.Sep) $($Tweak.Name)") ([Math]::Max(10, $rest))
+
+    Write-Host "`r$counter" -NoNewline -ForegroundColor DarkGray
+    Write-Host (([string]$script:Glyph.Full) * $fill) -NoNewline -ForegroundColor Cyan
+    Write-Host (([string]$script:Glyph.Empty) * ($barWidth - $fill)) -NoNewline -ForegroundColor DarkGray
+    Write-Host " $percent" -NoNewline -ForegroundColor DarkGray
+    Write-Host $text.PadRight([Math]::Max(0, $script:Ui.Width - $counter.Length - $barWidth - $percent.Length - 3)) -NoNewline -ForegroundColor DarkGray
+}
+
+function Write-TweakLine {
+    <# Ergebniszeile einer Einstellung. #>
+    param(
+        [hashtable]$Tweak, [int]$Index, [int]$Total,
+        [string]$Symbol, [string]$Status = '', [string]$StatusColor = 'DarkGray'
+    )
+    $counter = '  [{0}/{1}] ' -f $Index.ToString().PadLeft($Total.ToString().Length), $Total
+    $prefix = "$(Format-UiCut $Tweak.ModuleName 24) $($script:Glyph.Sep) "
+    $nameSpace = $script:Ui.Width - $counter.Length - 2 - $prefix.Length - $Status.Length - 3
+    $name = Format-UiCut $Tweak.Name ([Math]::Max(10, $nameSpace))
+    $pad = ' ' * [Math]::Max(1, $script:Ui.Width - $counter.Length - 2 - $prefix.Length - $name.Length - $Status.Length - 2)
+
+    if (-not $script:Ui.Plain) { Write-Host "`r" -NoNewline }
+    Write-Host $counter -NoNewline -ForegroundColor DarkGray
+    Write-Host "$Symbol " -NoNewline -ForegroundColor $StatusColor
+    Write-Host $prefix -NoNewline -ForegroundColor DarkGray
+    Write-Host $name -NoNewline -ForegroundColor Gray
+    Write-Host $pad -NoNewline
+    Write-Host $Status -ForegroundColor $StatusColor
+}
+
+function Show-RunFooter {
+    param($Stats, $Session, [switch]$Preview, [timespan]$Elapsed, [string[]]$Warnings)
+    Write-Host ''
+    Write-UiRule
+    if ($Preview) {
+        Write-Host '  ' -NoNewline
+        Write-Host ("{0} {1} Änderungen wären nötig" -f $script:Glyph.Run, $Stats.Planned) -NoNewline -ForegroundColor Cyan
+        Write-Host ("     {0} {1} bereits gesetzt" -f $script:Glyph.Skip, $Stats.Unchanged) -NoNewline -ForegroundColor DarkGray
+        Write-Host ("     {0:mm\:ss}" -f $Elapsed) -ForegroundColor DarkGray
+        Write-Host '  Vorschau - es wurde nichts verändert.' -ForegroundColor Yellow
+    }
+    else {
+        Write-Host '  ' -NoNewline
+        Write-Host ("{0} {1} Änderungen" -f $script:Glyph.Ok, $Stats.Changed) -NoNewline -ForegroundColor $(if ($Stats.Changed) { 'Green' } else { 'DarkGray' })
+        Write-Host ("     {0} {1} bereits gesetzt" -f $script:Glyph.Skip, $Stats.Unchanged) -NoNewline -ForegroundColor DarkGray
+        Write-Host ("     {0} {1} Hinweise" -f $script:Glyph.Warn, $Stats.Warnings) -NoNewline -ForegroundColor $(if ($Stats.Warnings) { 'Yellow' } else { 'DarkGray' })
+        Write-Host ("     {0:mm\:ss}" -f $Elapsed) -ForegroundColor DarkGray
+    }
+    if ($Warnings.Count) {
+        Write-Host ''
+        Write-Host '  Hinweise:' -ForegroundColor Yellow
+        foreach ($w in $Warnings) { Write-Host "    $($script:Glyph.Warn) $w" -ForegroundColor DarkYellow }
+    }
+    Write-Host ''
+    if ($Session.JournalFile -and (Test-Path -LiteralPath $Session.JournalFile)) {
+        Write-Host '  Sicherung    ' -NoNewline -ForegroundColor DarkGray
+        Write-Host $Session.JournalFile -ForegroundColor Gray
+        Write-Host '  Rückgängig   ' -NoNewline -ForegroundColor DarkGray
+        Write-Host 'bye2spy.ps1 -Restore Latest' -ForegroundColor Gray
+    }
+    Write-Host '  Protokoll    ' -NoNewline -ForegroundColor DarkGray
+    Write-Host $Session.LogFile -ForegroundColor Gray
+    if (-not $Preview -and $Stats.Changed -gt 0) {
+        Write-Host ''
+        Write-Host "  $($script:Glyph.Run) Neustart empfohlen, damit alle Richtlinien greifen." -ForegroundColor Cyan
+    }
+    Write-Host ''
+}
+
+#endregion
 
 function Invoke-Bye2Spy {
     param([object[]]$Tweaks, [switch]$Preview, [bool]$RestorePoint = $true)
 
+    Initialize-B2SUi -ForcePlain:$Detailed
     $session = Start-B2SSession -Root $Root -WhatIf:$Preview
-    $i = Get-B2SSystemInfo
-    Write-B2SLog "bye2spy $Version - $($i.ProductName) $($i.Version) (Build $($i.Build)) - $($Tweaks.Count) Einstellungen" Step
-    if ($Preview) { Write-B2SLog 'VORSCHAU: Es werden keine Änderungen vorgenommen.' Info }
-    if ($RestorePoint -and -not $Preview) { New-B2SRestorePoint }
+    $sys = Get-B2SSystemInfo
+    $start = Get-Date
+    $script:Ui.Warnings = New-Object System.Collections.ArrayList
 
-    $n = 0
-    foreach ($t in $Tweaks) {
-        $n++
-        Invoke-B2STweak -Tweak $t
-        if ($script:ProgressCallback) { & $script:ProgressCallback $n $Tweaks.Count }
+    # Ausgabe übernehmen: alles landet weiterhin im Protokoll, auf der Konsole nur das Wesentliche
+    Set-B2SLogSink {
+        param($Message, $Level)
+        $text = "$Message".Trim()
+        if ($Level -eq 'Warn' -or $Level -eq 'Error') {
+            if ($text) { [void]$script:Ui.Warnings.Add($text) }
+            if ($script:Ui.Plain -and $text) { Write-Host "      $($script:Glyph.Warn) $text" -ForegroundColor Yellow }
+            return
+        }
+        # Im ausführlichen Modus nur die Detailzeilen - die Überschrift liefert die Ergebniszeile
+        if (-not $script:Ui.Plain -or $Level -eq 'Step') { return }
+        if ($text) { Write-Host "      $text" -ForegroundColor DarkGray }
     }
 
-    $stats = Get-B2SStats
-    Write-B2SLog '' Info
-    Write-B2SLog ('Fertig: {0} Änderungen, {1} Werte waren bereits gesetzt, {2} Warnungen.' -f $stats.Changed, $stats.Unchanged, $stats.Warnings) OK
-    if ($session.JournalFile -and (Test-Path -LiteralPath $session.JournalFile)) {
-        Write-B2SLog "Sicherung (für Rückgängig): $($session.JournalFile)" Info
+    try {
+        Write-B2SLog "bye2spy $Version - $($sys.ProductName) $($sys.Version) (Build $($sys.Build)) - $($Tweaks.Count) Einstellungen" Step
+        Show-RunHeader -Sys $sys -Count $Tweaks.Count -Preview:$Preview -RestorePoint $RestorePoint
+
+        if ($RestorePoint -and -not $Preview) {
+            $before = (Get-B2SStats).Warnings
+            if (-not $script:Ui.Plain) {
+                Write-Host "  $($script:Glyph.Run) Systemwiederherstellungspunkt wird erstellt ..." -NoNewline -ForegroundColor DarkGray
+            }
+            New-B2SRestorePoint
+            if (-not $script:Ui.Plain) {
+                $failed = (Get-B2SStats).Warnings -gt $before
+                Write-Host "`r  " -NoNewline
+                if ($failed) { Write-Host "$($script:Glyph.Warn) Systemwiederherstellungspunkt nicht erstellt (siehe Hinweise)      " -ForegroundColor Yellow }
+                else { Write-Host "$($script:Glyph.Ok) Systemwiederherstellungspunkt erstellt                         " -ForegroundColor Green }
+            }
+            Write-Host ''
+        }
+
+        $n = 0
+        foreach ($t in $Tweaks) {
+            $n++
+            Write-RunningLine -Tweak $t -Index $n -Total $Tweaks.Count
+
+            $before = Get-B2SStats
+            $warnBefore = $script:Ui.Warnings.Count
+            Invoke-B2STweak -Tweak $t
+            $after = Get-B2SStats
+
+            $changed = ($after.Changed - $before.Changed) + ($after.Planned - $before.Planned)
+            $warned = $script:Ui.Warnings.Count - $warnBefore
+            if ($warned -gt 0) {
+                $sym = $script:Glyph.Warn; $color = 'Yellow'
+                $status = "$warned Hinweis$(if ($warned -gt 1) { 'e' })"
+            }
+            elseif ($changed -gt 0) {
+                $sym = $script:Glyph.Ok; $color = 'Green'
+                $status = if ($Preview) { "$changed offen" } else { "$changed geändert" }
+                if ($Preview) { $color = 'Cyan' }
+            }
+            else {
+                $sym = $script:Glyph.Skip; $color = 'DarkGray'
+                $status = 'bereits aktiv'
+            }
+            Write-TweakLine -Tweak $t -Index $n -Total $Tweaks.Count -Symbol $sym -Status $status -StatusColor $color
+            if ($warned -gt 0 -and -not $script:Ui.Plain) {
+                foreach ($w in $script:Ui.Warnings[($warnBefore)..($script:Ui.Warnings.Count - 1)]) {
+                    Write-Host ('      ' + (Format-UiCut $w ($script:Ui.Width - 8))) -ForegroundColor DarkYellow
+                }
+            }
+        }
     }
-    Write-B2SLog "Protokoll: $($session.LogFile)" Info
-    if (-not $Preview -and $stats.Changed -gt 0) {
-        Write-B2SLog 'Bitte Windows neu starten, damit alle Richtlinien greifen.' Info
+    finally {
+        # Abschlusszeilen nur ins Protokoll (die Konsole bekommt die Zusammenfassung unten)
+        $stats = Get-B2SStats
+        Write-B2SLog ('Fertig: {0} Änderungen, {1} Werte waren bereits gesetzt, {2} Warnungen.' -f $stats.Changed, $stats.Unchanged, $stats.Warnings) OK
+        if ($session.JournalFile -and (Test-Path -LiteralPath $session.JournalFile)) {
+            Write-B2SLog "Sicherung (für Rückgängig): $($session.JournalFile)" Info
+        }
+        Write-B2SLog "Protokoll: $($session.LogFile)" Info
+        Set-B2SLogSink $null
     }
+
+    Show-RunFooter -Stats $stats -Session $session -Preview:$Preview -Elapsed ((Get-Date) - $start) -Warnings @($script:Ui.Warnings)
     $stats
 }
 
@@ -246,6 +482,15 @@ function Show-TweakTable {
     }
     Write-Host ''
     Write-Host '  * = in "Empfohlen" enthalten' -ForegroundColor DarkGray
+    if ($Presets.Count) {
+        Write-Host ''
+        Write-Host '  Presets (-Preset <Name>)' -ForegroundColor Cyan
+        Write-Host '    Recommended   alle Einstellungen mit geringem Risiko' -ForegroundColor Gray
+        Write-Host '    All           alles, auch mittleres und hohes Risiko' -ForegroundColor Gray
+        foreach ($p in $Presets) {
+            Write-Host ("    {0,-13} {1} ({2} Einstellungen)" -f $p.Id, $p.Description, (Get-PresetTweaks $p).Count) -ForegroundColor Gray
+        }
+    }
 }
 
 function Wait-IfElevated {
@@ -408,7 +653,7 @@ function Show-MenuScreen {
     foreach ($l in (Get-WrappedText -Text $desc -Width ($w - 2) -MaxLines 3)) { Write-Row @(, @(" $l", $descColor)) }
     Write-Row @(, @(('-' * $w), 'DarkGray'))
     Write-Row @(, @(' Pfeile bewegen  Leertaste an/aus  Enter/Rechts aufklappen  Links zuklappen  Tab alle auf/zu  D Details', 'DarkGray'))
-    Write-Row @(, @(' E Empfohlen  A Alles  N Nichts  S Status  V Vorschau  W ANWENDEN  R Rückgängig  P Wiederherst.punkt  Q Ende', 'DarkGray'))
+    Write-Row @(, @(' E Empfohlen  K Preset  A Alles  N Nichts  S Status  V Vorschau  W ANWENDEN  R Rückgängig  P Wiederherst.punkt  Q Ende', 'DarkGray'))
     Write-Row @(, @(" $Message", 'Yellow'))
 }
 
@@ -528,6 +773,29 @@ function Show-Menu {
 
             switch ($char) {
                 'E' { foreach ($t in $AllTweaks) { $selected[$t.Id] = [bool]$t.Recommended }; $message = 'Empfohlene Auswahl gesetzt (nur geringes Risiko).' }
+                'K' {
+                    if (-not $Presets.Count) { $message = 'Keine Presets im Ordner .\presets gefunden.'; break }
+                    [Console]::CursorVisible = $true
+                    Clear-Host
+                    Write-Host ''
+                    Write-Host '  Presets' -ForegroundColor Cyan
+                    for ($p = 0; $p -lt $Presets.Count; $p++) {
+                        $pt = Get-PresetTweaks $Presets[$p]
+                        Write-Host ('  {0,3}) {1} - {2} Einstellungen' -f ($p + 1), $Presets[$p].Name, $pt.Count) -ForegroundColor Gray
+                        Write-Host "       $($Presets[$p].Description)" -ForegroundColor DarkGray
+                        foreach ($n in @($Presets[$p].Notes)) { Write-Host "       - $n" -ForegroundColor DarkYellow }
+                    }
+                    Write-Host ''
+                    $choice = (Read-Host '  Welches Preset übernehmen? (leer = abbrechen)').Trim()
+                    if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $Presets.Count) {
+                        $def = $Presets[[int]$choice - 1]
+                        $ids = @((Get-PresetTweaks $def) | ForEach-Object { $_.Id })
+                        foreach ($t in $AllTweaks) { $selected[$t.Id] = ($ids -contains $t.Id) }
+                        $message = "Preset '$($def.Name)' übernommen: $($ids.Count) Einstellungen ausgewählt."
+                    }
+                    [Console]::CursorVisible = $false
+                    Clear-Host
+                }
                 'A' { foreach ($t in $AllTweaks) { $selected[$t.Id] = $true }; $message = 'ALLES ausgewählt - inkl. Einstellungen mit mittlerem/hohem Risiko. Vor dem Anwenden prüfen!' }
                 'N' { foreach ($t in $AllTweaks) { $selected[$t.Id] = $false }; $message = 'Auswahl geleert.' }
                 'P' { $restorePoint = -not $restorePoint }
@@ -618,9 +886,18 @@ if ($Restore) {
 }
 
 if ($Preset -or $Module.Count -or $Tweak.Count) {
-    Write-Banner
+    Initialize-B2SUi -ForcePlain:$Detailed
+    if ($Preset -and (Get-PresetNames) -notcontains $Preset) {
+        Write-Host ''
+        Write-Host "  Unbekanntes Preset: $Preset" -ForegroundColor Red
+        Write-Host "  Verfügbar: $((Get-PresetNames) -join ', ')" -ForegroundColor Gray
+        Wait-IfElevated
+        exit 1
+    }
     $sel = Select-Tweaks -PresetName $Preset -ModuleIds $Module -TweakIds $Tweak -ExcludeIds $Exclude
     if (-not $sel.Count) { Write-Host 'Keine Einstellungen ausgewählt.' -ForegroundColor Yellow; Wait-IfElevated; exit 1 }
+    $presetDef = Get-Preset $Preset
+    if ($presetDef) { Show-PresetInfo -PresetDef $presetDef -Count $sel.Count }
     if (-not $Yes -and -not $DryRun) {
         if (-not (Confirm-Console $sel)) { exit }
     }
