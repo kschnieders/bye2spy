@@ -657,6 +657,107 @@ function Show-MenuScreen {
     Write-Row @(, @(" $Message", 'Yellow'))
 }
 
+function Get-PresetChoices {
+    <# Wählbare Presets: die beiden eingebauten plus die Dateien aus .\presets. #>
+    $choices = New-Object System.Collections.ArrayList
+    [void]$choices.Add([pscustomobject]@{
+        Name        = 'Empfohlen'
+        Description = 'Alle Einstellungen mit geringem Risiko - der sichere Standard.'
+        Notes       = @()
+        Tweaks      = @($AllTweaks | Where-Object { $_.Recommended })
+    })
+    [void]$choices.Add([pscustomobject]@{
+        Name        = 'Alles'
+        Description = 'Jede Einstellung, auch mit mittlerem und hohem Risiko. Vor dem Anwenden prüfen.'
+        Notes       = @()
+        Tweaks      = @($AllTweaks)
+    })
+    foreach ($p in $Presets) {
+        [void]$choices.Add([pscustomobject]@{
+            Name        = $p.Name
+            Description = $p.Description
+            Notes       = @($p.Notes)
+            Tweaks      = @(Get-PresetTweaks $p)
+        })
+    }
+    , $choices.ToArray()
+}
+
+function Show-PresetScreen {
+    param($Choices, [int]$Cursor, [int]$Top, [int]$ListHeight, [int]$NoteHeight)
+
+    $w = [Console]::WindowWidth - 1
+    [Console]::SetCursorPosition(0, 0)
+    Write-Row @(@(' Presets', 'Cyan'), @('  -  fertige Zusammenstellungen übernehmen', 'Gray'))
+    Write-Row @(, @(('-' * $w), 'DarkGray'))
+
+    $nameWidth = [Math]::Max(12, [Math]::Min(34, $w - 42))
+    for ($r = $Top; $r -lt $Top + $ListHeight; $r++) {
+        if ($r -ge $Choices.Count) { Write-Row @(, @('', 'Gray')); continue }
+        $c = $Choices[$r]
+        $med = @($c.Tweaks | Where-Object { $_.Risk -eq 'Medium' }).Count
+        $high = @($c.Tweaks | Where-Object { $_.Risk -eq 'High' }).Count
+        $name = $c.Name
+        if ($name.Length -gt $nameWidth) { $name = $name.Substring(0, $nameWidth - 3) + '...' }
+        Write-Row @(
+            @('   ', 'White'),
+            @($name.PadRight($nameWidth), 'Cyan'),
+            @(('{0,3} Einstellungen' -f $c.Tweaks.Count), 'Gray'),
+            @("   (Mittel: $med, Hoch: $high)", $(if ($high) { 'Red' } elseif ($med) { 'Yellow' } else { 'DarkGray' }))
+        ) ($r -eq $Cursor)
+    }
+
+    Write-Row @(, @(('-' * $w), 'DarkGray'))
+    $cur = $Choices[$Cursor]
+    foreach ($l in (Get-WrappedText -Text $cur.Description -Width ($w - 2) -MaxLines 2)) { Write-Row @(, @(" $l", 'Gray')) }
+    $notes = @(@($cur.Notes) | ForEach-Object { "  - $_" })
+    while ($notes.Count -lt $NoteHeight) { $notes += '' }
+    for ($n = 0; $n -lt $NoteHeight; $n++) { Write-Row @(, @(" $($notes[$n])", 'DarkYellow')) }
+    Write-Row @(, @(('-' * $w), 'DarkGray'))
+    Write-Row @(, @(' Pfeile bewegen  Enter übernehmen  Esc zurück zum Menü', 'DarkGray'))
+}
+
+function Show-PresetPicker {
+    <# Preset-Auswahl mit Pfeiltasten. Gibt das gewählte Preset zurück oder $null. #>
+    $choices = Get-PresetChoices
+    # Notizbereich so hoch wie das Preset mit den meisten Hinweisen, damit das Bild nicht springt
+    $noteHeight = [Math]::Min(6, [Math]::Max(1, (@($choices | ForEach-Object { @($_.Notes).Count }) | Measure-Object -Maximum).Maximum))
+    $cursor = 0
+    $top = 0
+    $lastSize = ''
+    while ($true) {
+        $size = '{0}x{1}' -f [Console]::WindowWidth, [Console]::WindowHeight
+        if ($size -ne $lastSize) { Clear-Host; $lastSize = $size }
+
+        $listHeight = [Math]::Max(3, [Math]::Min($choices.Count, [Console]::WindowHeight - 7 - $noteHeight))
+        if ($cursor -lt $top) { $top = $cursor }
+        if ($cursor -ge $top + $listHeight) { $top = $cursor - $listHeight + 1 }
+        if ($top -gt [Math]::Max(0, $choices.Count - $listHeight)) { $top = [Math]::Max(0, $choices.Count - $listHeight) }
+
+        Show-PresetScreen -Choices $choices -Cursor $cursor -Top $top -ListHeight $listHeight -NoteHeight $noteHeight
+
+        $key = [Console]::ReadKey($true)
+        switch ($key.Key) {
+            'UpArrow'   { $cursor-- }
+            'DownArrow' { $cursor++ }
+            'PageUp'    { $cursor -= $listHeight }
+            'PageDown'  { $cursor += $listHeight }
+            'Home'      { $cursor = 0 }
+            'End'       { $cursor = $choices.Count - 1 }
+            'Enter'     { Clear-Host; return $choices[$cursor] }
+            'Spacebar'  { Clear-Host; return $choices[$cursor] }
+            'Escape'    { Clear-Host; return $null }
+            'LeftArrow' { Clear-Host; return $null }
+            default {
+                if ("$($key.KeyChar)".ToUpper() -eq 'Q') { Clear-Host; return $null }
+            }
+        }
+        # Am Rand umlaufen, die Liste ist kurz
+        if ($cursor -lt 0) { $cursor = $choices.Count - 1 }
+        if ($cursor -ge $choices.Count) { $cursor = 0 }
+    }
+}
+
 function Show-RestoreMenu {
     Clear-Host
     $files = Get-BackupFiles
@@ -774,26 +875,13 @@ function Show-Menu {
             switch ($char) {
                 'E' { foreach ($t in $AllTweaks) { $selected[$t.Id] = [bool]$t.Recommended }; $message = 'Empfohlene Auswahl gesetzt (nur geringes Risiko).' }
                 'K' {
-                    if (-not $Presets.Count) { $message = 'Keine Presets im Ordner .\presets gefunden.'; break }
-                    [Console]::CursorVisible = $true
-                    Clear-Host
-                    Write-Host ''
-                    Write-Host '  Presets' -ForegroundColor Cyan
-                    for ($p = 0; $p -lt $Presets.Count; $p++) {
-                        $pt = Get-PresetTweaks $Presets[$p]
-                        Write-Host ('  {0,3}) {1} - {2} Einstellungen' -f ($p + 1), $Presets[$p].Name, $pt.Count) -ForegroundColor Gray
-                        Write-Host "       $($Presets[$p].Description)" -ForegroundColor DarkGray
-                        foreach ($n in @($Presets[$p].Notes)) { Write-Host "       - $n" -ForegroundColor DarkYellow }
-                    }
-                    Write-Host ''
-                    $choice = (Read-Host '  Welches Preset übernehmen? (leer = abbrechen)').Trim()
-                    if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $Presets.Count) {
-                        $def = $Presets[[int]$choice - 1]
-                        $ids = @((Get-PresetTweaks $def) | ForEach-Object { $_.Id })
+                    $pick = Show-PresetPicker
+                    if ($pick) {
+                        $ids = @($pick.Tweaks | ForEach-Object { $_.Id })
                         foreach ($t in $AllTweaks) { $selected[$t.Id] = ($ids -contains $t.Id) }
-                        $message = "Preset '$($def.Name)' übernommen: $($ids.Count) Einstellungen ausgewählt."
+                        $message = "Preset '$($pick.Name)' übernommen: $($ids.Count) Einstellungen ausgewählt."
                     }
-                    [Console]::CursorVisible = $false
+                    else { $message = 'Preset-Auswahl abgebrochen.' }
                     Clear-Host
                 }
                 'A' { foreach ($t in $AllTweaks) { $selected[$t.Id] = $true }; $message = 'ALLES ausgewählt - inkl. Einstellungen mit mittlerem/hohem Risiko. Vor dem Anwenden prüfen!' }
